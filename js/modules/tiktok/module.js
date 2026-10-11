@@ -240,6 +240,41 @@ async function tiktokConnection() {
 // ---------------------------
 // TIKTOK UTILITY FUNCTIONS
 
+// Avatar cache keyed by the viewer's uniqueId. A TikTok avatar URL is stable
+// for a session, so a repeat chatter is served from memory instead of being
+// re-downloaded on every message.
+const tiktokAvatars = new Map();
+// URLs already decoded once. Skipping the wait for these keeps repeat messages
+// instant while still guaranteeing a first-time avatar is ready before display.
+const tiktokAvatarsReady = new Set();
+
+// Decode an image before it is used, resolving on load OR error so a broken
+// avatar can never stall the chat. Resolves true only when the image is usable.
+function preloadTikTokImage(url) {
+    return new Promise((resolve) => {
+        if (!url) return resolve(false);
+        if (tiktokAvatarsReady.has(url)) return resolve(true);
+        const img = new Image();
+        img.onload = () => { tiktokAvatarsReady.add(url); resolve(true); };
+        img.onerror = () => resolve(false);
+        img.src = url;
+    });
+}
+
+// Resolve the avatar for a message. A fresh URL from the payload refreshes the
+// cache; when the payload carries none (some events omit it) the cached URL for
+// this user is reused, so an avatar is not lost on a partial payload.
+function resolveTikTokAvatar(data) {
+    const id = String((data && data.uniqueId) || '').toLowerCase();
+    const fresh = (data && data.profilePictureUrl)
+        || (data && data.user && data.user.profilePicture && data.user.profilePicture.urls
+            ? data.user.profilePicture.urls[0] : '')
+        || '';
+    if (fresh && id) tiktokAvatars.set(id, fresh);
+    if (fresh) return fresh;
+    return id ? (tiktokAvatars.get(id) || '') : '';
+}
+
 async function tiktokChatMessage(data) {
     
     if (!data?.comment) { data.comment = " "; }
@@ -272,12 +307,18 @@ async function tiktokChatMessage(data) {
     );
 
     const classes = ['tiktok', 'msg'];
-    const avatarImage = data.profilePictureUrl;
+    const avatarImage = resolveTikTokAvatar(data);
     
     const [badgesHTML, roles] = await Promise.all([
         getTikTokBadges(data),
         getTiktokRoles(data)
     ]);
+
+    // Hold the message until its avatar is decoded, so the picture never
+    // pops in late. Cached URLs return immediately. Skipped when avatars are
+    // switched off, so a disabled avatar never delays the chat.
+    const avatarOk = (showAvatar && avatarImage)
+        ? await preloadTikTokImage(avatarImage) : false;
 
     if (data.uniqueId === data.tikfinityUsername) roles.push('streamer');
     if (data.isModerator) roles.push('moderator');
@@ -290,7 +331,8 @@ async function tiktokChatMessage(data) {
     reply.remove();
     pronoun.remove();
 
-    if (showAvatar) avatar.innerHTML = `<img src="${avatarImage}">`; else avatar.remove();
+    if (showAvatar && avatarImage && avatarOk) avatar.innerHTML = `<img src="${avatarImage}">`;
+    else avatar.remove();
     
     if (showBadges) {
         if (!badgesHTML) { badges.remove(); }
@@ -1149,8 +1191,37 @@ async function getTikTokEmotesForEulerStream(data, messageElement) {
 
 
 
+// Text shown inside a grade/fan badge pill. The Geseki bridge ships a ready
+// label on badge.name ("18" for a grade, the club tag for a fan badge), while
+// TikFinity ships a numeric level instead. A badge whose label is unknown shows
+// the icon alone: never render "0".
+function resolveBadgeLabel(badge, level, fallbackTag) {
+    const name = String((badge && badge.name) || '').trim();
+    if (name) return name;
+    const lv = Number(level) || 0;
+    if (lv > 0) return String(lv);
+    return String(fallbackTag || '').trim();
+}
+
+// Numeric level for a badge, read from the entry (TikFinity) or derived from
+// the bridge's numeric label in badge.name, then the user-level fallback.
+function resolveBadgeLevel(badge, fallback) {
+    const direct = Number(badge && badge.level);
+    if (direct > 0) return direct;
+    const fromName = Number(String((badge && badge.name) || '').trim());
+    if (fromName > 0) return fromName;
+    return Number(fallback) || 0;
+}
+
 async function getTikTokBadges(data) {
     const { isSubscriber, isModerator, userBadges } = data;
+
+    // Geseki bridge sends the badge artwork directly on the entry (url/image)
+    // and keeps the grade/fan level on the user (gifterLevel, teamMemberLevel
+    // or fansClubInfo.fansLevel). TikFinity instead puts the level on each
+    // badge entry. Read both shapes so one code path serves either source.
+    const gradeFallback = Number(data.gifterLevel) || 0;
+    const fanFallback = Number(data.fansClubInfo?.fansLevel) || Number(data.teamMemberLevel) || 0;
 
     let badgesHTML = [
         //isSubscriber && '<span class="badge sub"><i class="fa-solid fa-star"></i></span>',
@@ -1182,41 +1253,59 @@ async function getTikTokBadges(data) {
 
     if ((userBadges) && (userBadges.length > 0)) {
         userBadges.forEach(badge => {
-            // Top Gifter Badges
-            if (badge.badgeSceneType === 6) {
-                badgesHTML.push(
-                    `<span class="badge top-gifter">
-                        <img src="${badge.url}" alt="${badge.displayType}">
-                        <em>No. ${data.topGifterRank}</em>
-                    </span>`
-                );
-            }
+            // Artwork: the Geseki bridge already resolves the exact badge image
+            // and puts it on the entry (url/image). Only fall back to the
+            // level-based TikFinity tables when the entry carries no image.
+            const art = badge.url || badge.image || '';
 
-            // Scene Eight - Grade Badges
-            if (badge.badgeSceneType === 8) {
-                const match = badgesLevelEight.find(lv => badge.level >= lv.min && badge.level <= lv.max);
-                if (match) {
+            // Top Gifter Badges. The bridge carries no rank number, so show the
+            // icon alone rather than an empty "No. null".
+            if (badge.badgeSceneType === 6) {
+                if (art) {
+                    const rank = (data.topGifterRank != null && data.topGifterRank !== '')
+                        ? `<em>No. ${data.topGifterRank}</em>` : '';
                     badgesHTML.push(
-                        `<span class="badge sceneEight">
-                            <img src="${match.url}" alt="Level ${badge.level}">
-                            <em>${badge.level}</em>
+                        `<span class="badge top-gifter">
+                            <img src="${art}" alt="${badge.displayType || badge.name || ''}">
+                            ${rank}
                         </span>`
                     );
                 }
             }
 
-            // Scene Ten - Fan Badges
+            // Scene Eight - Grade Badges. The level may sit on the entry
+            // (TikFinity), in badge.name (bridge label), or on the user
+            // (bridge: gifterLevel).
+            if (badge.badgeSceneType === 8) {
+                const level = resolveBadgeLevel(badge, gradeFallback);
+                const label = resolveBadgeLabel(badge, level, '');
+                const url = art || badgesLevelEight.find(lv => level >= lv.min && level <= lv.max)?.url;
+                if (url) {
+                    badgesHTML.push(
+                        `<span class="badge sceneEight">
+                            <img src="${url}" alt="${label ? 'Level ' + label : 'Grade badge'}">
+                            ${label ? `<em>${label}</em>` : ''}
+                        </span>`
+                    );
+                }
+            }
+
+            // Scene Ten - Fan Badges. Level may sit on the entry (TikFinity),
+            // in badge.name (bridge label), or on the user (bridge:
+            // fansClubInfo.fansLevel / teamMemberLevel).
             if (badge.badgeSceneType === 10) {
 
                 let badgeClasses = ['badge', 'sceneTen'];
                 badgeClasses = badgeClasses.join(" ");
 
-                const match = badgesLevelTen.find(lv => badge.level >= lv.min && badge.level <= lv.max);
-                if (match) {
+                const level = resolveBadgeLevel(badge, fanFallback);
+                const label = resolveBadgeLabel(badge, level, tiktokFanClubTag);
+                const url = art || badgesLevelTen.find(lv => level >= lv.min && level <= lv.max)?.url;
+                if (url) {
                     badgesHTML.push(
                         `<span class="${badgeClasses}">
-                            <img src="${match.url}" alt="Level ${badge.level}">
-                            <em>${tiktokFanClubTag}</em>
+                            <img src="${url}" alt="${label ? 'Level ' + label : 'Fan badge'}">
+                            ${label ? `<em>${label}</em>` : ''}
                         </span>`
                     );
                 }
@@ -1339,6 +1428,11 @@ async function getTiktokRoles(data) {
 
     const { userBadges } = data;
 
+    // Level may sit on each badge entry (TikFinity) or on the user (Geseki
+    // bridge: gifterLevel / teamMemberLevel / fansClubInfo.fansLevel).
+    const gradeFallback = Number(data.gifterLevel) || 0;
+    const fanFallback = Number(data.fansClubInfo?.fansLevel) || Number(data.teamMemberLevel) || 0;
+
     const badgesLevelEight = [
         { min: 1,  max: 4,  class: 'grade-one' },
         { min: 5,  max: 9,  class: 'grade-one grade-five' },
@@ -1364,12 +1458,16 @@ async function getTiktokRoles(data) {
 
     if (userBadges?.length > 0) {
         userBadges.forEach(badge => {
-            // Top Gifter Badges
-            if (badge.badgeSceneType === 6) rolesArray.push(`top-gifter-${data.topGifterRank}`);
+            // Top Gifter Badges. The bridge carries no rank, so only add the
+            // rank class when a real number is present (never 'top-gifter-null').
+            if (badge.badgeSceneType === 6 && data.topGifterRank != null && data.topGifterRank !== '') {
+                rolesArray.push(`top-gifter-${data.topGifterRank}`);
+            }
 
             // Scene Ten - Fan Badges
             if (badge.badgeSceneType === 10) {
-                const match = badgesLevelTen.find(lv => badge.level >= lv.min && badge.level <= lv.max);
+                const level = resolveBadgeLevel(badge, fanFallback);
+                const match = badgesLevelTen.find(lv => level >= lv.min && level <= lv.max);
                 if (match) {
                     const classArrays = match.class.split(' ');
                     rolesArray.push(...classArrays);
@@ -1380,7 +1478,8 @@ async function getTiktokRoles(data) {
 
             // Scene Eight - Grade Badges
             if (badge.badgeSceneType === 8) {
-                const match = badgesLevelEight.find(lv => badge.level >= lv.min && badge.level <= lv.max);
+                const level = resolveBadgeLevel(badge, gradeFallback);
+                const match = badgesLevelEight.find(lv => level >= lv.min && level <= lv.max);
                 if (match) {
                     const classArrays = match.class.split(' ');
                     rolesArray.push(...classArrays);
