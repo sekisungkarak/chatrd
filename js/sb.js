@@ -141,6 +141,10 @@ function getURLParamLegacy(param, newParam) {
 
 
 function registerPlatformHandlersToStreamerBot(handlers, logPrefix = '') {
+    if (!streamerBotClient || typeof streamerBotClient.on !== 'function') {
+        console.debug(`${logPrefix} Streamer.bot client not available, skipping event binding.`);
+        return;
+    }
     for (const [event, handler] of Object.entries(handlers)) {
         streamerBotClient.on(event, (...args) => {
             if (logPrefix) {
@@ -156,11 +160,18 @@ function registerPlatformHandlersToStreamerBot(handlers, logPrefix = '') {
 
 async function waitForStreamerBot(platformName = '') {
     const checkInterval = 1000;
+    const maxWaitMs = 2500; // Standalone bypass: jika Streamer.bot tidak aktif, lanjut mandiri
+    const startTime = Date.now();
 
     return new Promise((resolve) => {
         (function check() {
             if (streamerBotStatus && streamerBotStatus.connected === true) {
                 console.debug(`[ChatRD][StreamerBot] Connected. Releasing "${platformName}".`);
+                resolve();
+                return;
+            }
+            if (Date.now() - startTime >= maxWaitMs) {
+                console.info(`[ChatRD][StreamerBot] Streamer.bot not detected, running "${platformName}" in standalone mode.`);
                 resolve();
                 return;
             }
