@@ -142,6 +142,7 @@ async function tiktokConnection() {
 
     function connect() {
         const tikfinityWebSocket = new WebSocket(tikfinityWebSocketURL);
+        window.tikfinityWebSocket = tikfinityWebSocket;
 
         tikfinityWebSocket.onopen = () => {
             console.debug(`[ChatRD][TikFinity] Connected to TikFinity successfully!`);

@@ -926,6 +926,35 @@ async function loadChatInputSettingFromLocalStorage() {
     });
 }
 
+function sendTikTokChatViaGesekiBridge(message) {
+    if (!message || !message.trim()) return;
+
+    const ws = window.tikfinityWebSocket;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+            ws.send(JSON.stringify({
+                type: 'chatbot.send',
+                text: message,
+                priority: 10
+            }));
+            console.debug('[ChatRD][Geseki Bridge] Sent TikTok chat via WebSocket:', message);
+            return;
+        } catch (e) {
+            console.debug('[ChatRD][Geseki Bridge] WS send failed, fallback to HTTP:', e);
+        }
+    }
+
+    fetch('http://127.0.0.1:47800/chatbot/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: message, priority: 10 })
+    }).then(res => res.json()).then(data => {
+        console.debug('[ChatRD][Geseki Bridge] Sent TikTok chat via HTTP:', data);
+    }).catch(err => {
+        console.warn('[ChatRD][Geseki Bridge] Failed to send TikTok chat:', err);
+    });
+}
+
 async function pushChatInputSettings() {
     const chatSettings = document.getElementById("chat-settings");
     const checkboxes = chatSettings.querySelectorAll("input[type=checkbox]");
@@ -934,13 +963,14 @@ async function pushChatInputSettings() {
 
     const twitchSwitch = chatInputPlatformButtons.querySelector('#twitch');
     const youtubeSwitch = chatInputPlatformButtons.querySelector('#youtube');
-    //const tiktokSwitch = chatInputPlatformButtons.querySelector('#tiktok');
+    const tiktokSwitch = chatInputPlatformButtons.querySelector('#tiktok');
     const kickSwitch = chatInputPlatformButtons.querySelector('#kick');
 
-    if (showTwitch == false) { twitchSwitch.classList.add('hidden'); }
-    if (showYoutube == false) { youtubeSwitch.classList.add('hidden'); }
-    //if (showTiktok == false) { tiktokSwitch.classList.add('hidden'); }
-    if (showKick == false) { kickSwitch.classList.add('hidden'); }
+    if (showTwitch == false && twitchSwitch) { twitchSwitch.classList.add('hidden'); }
+    if (showYoutube == false && youtubeSwitch) { youtubeSwitch.classList.add('hidden'); }
+    const isTiktokVisible = (typeof showTiktok !== 'undefined' ? showTiktok : getURLParam("showTiktok", false));
+    if (isTiktokVisible == false && tiktokSwitch) { tiktokSwitch.classList.add('hidden'); }
+    if (showKick == false && kickSwitch) { kickSwitch.classList.add('hidden'); }
 
     pushChatInputButtonsToSettings();
 
@@ -961,42 +991,36 @@ chatInputForm.addEventListener("submit", function(event) {
 
     const chatSettings = document.getElementById("chat-settings");
 
-    const sendTwitchMessages = chatSettings.querySelector('input[type=checkbox][name="sendTwitchMessages"]').checked;
-    const sendYouTubeMessages = chatSettings.querySelector('input[type=checkbox][name="sendYouTubeMessages"]').checked;
-    //const sendTikTokMessages = chatSettings.querySelector('input[type=checkbox][name="sendTikTokMessages"]').checked;
-    const sendKickMessages = chatSettings.querySelector('input[type=checkbox][name="sendKickMessages"]').checked;
+    const sendTwitchMessages = chatSettings.querySelector('input[type=checkbox][name="sendTwitchMessages"]')?.checked ?? false;
+    const sendYouTubeMessages = chatSettings.querySelector('input[type=checkbox][name="sendYouTubeMessages"]')?.checked ?? false;
+    const sendTikTokMessages = chatSettings.querySelector('input[type=checkbox][name="sendTikTokMessages"]')?.checked ?? false;
+    const sendKickMessages = chatSettings.querySelector('input[type=checkbox][name="sendKickMessages"]')?.checked ?? false;
+
+    const isTiktokVisible = (typeof showTiktok !== 'undefined' ? showTiktok : getURLParam("showTiktok", false));
+    const isTiktokMsgs = (typeof showTikTokMessages !== 'undefined' ? showTikTokMessages : getURLParam("showTikTokMessages", true));
 
     if (showTwitch == true && showTwitchMessages == true && sendTwitchMessages == true) { chatSendPlatforms.push('twitch'); }
     if (showYoutube == true && showYouTubeMessages == true && sendYouTubeMessages == true) { chatSendPlatforms.push('youtube'); }
-    //if (showTiktok == true && showTikTokMessages == true && sendTikTokMessages == true) { chatSendPlatforms.push('tiktok'); }
     if (showKick == true && showKickMessages == true && sendKickMessages == true) { chatSendPlatforms.push('kick'); }
 
-    chatSendPlatforms = chatSendPlatforms.join(',');
-
-    streamerBotClient.doAction(
-    { name : "[Twitch][YouTube][Kick] Msgs/Cmds" },
-    {
-        "type": "chat",
-        "platforms": chatSendPlatforms,
-        "message": chatInputText,
-    }
-    ).then( (sendchatstuff) => {
-        console.debug('[ChatRD] Sending Chat to Streamer.Bot', sendchatstuff);
-    });
-    
-    
-    /*if (chatSendPlatforms.includes('tiktok')) {
-        if (!chatInputText.startsWith('/')) {
-            streamerBotClient.doAction(
-            { name : "[TikTok] Msgs" },
-            {
-                "ttkmessage": chatInputText,
-            }
-            ).then( (sendchatstuff) => {
-                console.debug('[ChatRD] Sending TikTok Chat to Streamer.Bot', sendchatstuff);
-            });
+    if (chatSendPlatforms.length > 0 && streamerBotClient && typeof streamerBotClient.doAction === 'function') {
+        streamerBotClient.doAction(
+        { name : "[Twitch][YouTube][Kick] Msgs/Cmds" },
+        {
+            "type": "chat",
+            "platforms": chatSendPlatforms.join(','),
+            "message": chatInputText,
         }
-    }*/
+        ).then( (sendchatstuff) => {
+            console.debug('[ChatRD] Sending Chat to Streamer.Bot', sendchatstuff);
+        }).catch( (err) => {
+            console.debug('[ChatRD] Streamer.Bot doAction error:', err);
+        });
+    }
+
+    if (isTiktokVisible == true && isTiktokMsgs == true && sendTikTokMessages == true) {
+        sendTikTokChatViaGesekiBridge(chatInputText);
+    }
 
     chatInput.value = '';
 });
